@@ -1,9 +1,18 @@
 
 package com.mlkit;
 
+import android.app.Activity;
+import android.content.Context;
 import android.graphics.Rect;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
+import android.os.Build;
 import android.support.annotation.NonNull;
+import android.support.annotation.RequiresApi;
 import android.util.Log;
+import android.util.SparseIntArray;
+import android.view.Surface;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
@@ -16,22 +25,22 @@ import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.gms.tasks.Task;
 import com.google.firebase.ml.vision.FirebaseVision;
-import com.google.firebase.ml.vision.common.FirebaseVisionPoint;
+import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcode;
+import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcodeDetector;
+import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcodeDetectorOptions;
+import com.google.firebase.ml.vision.common.FirebaseVisionImage;
+import com.google.firebase.ml.vision.common.FirebaseVisionImageMetadata;
 import com.google.firebase.ml.vision.face.FirebaseVisionFace;
 import com.google.firebase.ml.vision.face.FirebaseVisionFaceContour;
 import com.google.firebase.ml.vision.face.FirebaseVisionFaceDetector;
 import com.google.firebase.ml.vision.face.FirebaseVisionFaceDetectorOptions;
-import com.google.firebase.ml.vision.text.FirebaseVisionCloudTextRecognizerOptions;
-import com.google.firebase.ml.vision.common.FirebaseVisionImage;
+import com.google.firebase.ml.vision.label.FirebaseVisionImageLabel;
+import com.google.firebase.ml.vision.label.FirebaseVisionImageLabeler;
 import com.google.firebase.ml.vision.text.FirebaseVisionText;
 import com.google.firebase.ml.vision.text.FirebaseVisionTextRecognizer;
-import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcode;
-import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcodeDetector;
-import com.google.firebase.ml.vision.barcode.FirebaseVisionBarcodeDetectorOptions;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.ArrayList;
 
 public class RNMlKitModule extends ReactContextBaseJavaModule {
 
@@ -427,6 +436,112 @@ public class RNMlKitModule extends ReactContextBaseJavaModule {
 
       return data;
   }
+
+
+  ///// Image labeling - https://firebase.google.com/docs/ml-kit/android/label-images
+
+  private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
+  static {
+      ORIENTATIONS.append(Surface.ROTATION_0, 90);
+      ORIENTATIONS.append(Surface.ROTATION_90, 0);
+      ORIENTATIONS.append(Surface.ROTATION_180, 270);
+      ORIENTATIONS.append(Surface.ROTATION_270, 180);
+  }
+
+  /**
+   * Get the angle by which an image must be rotated given the device's current
+   * orientation.
+   */
+  @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
+  private int getRotationCompensation(String cameraId, Activity activity, Context context)
+          throws CameraAccessException {
+      // Get the device's current rotation relative to its "native" orientation.
+      // Then, from the ORIENTATIONS table, look up the angle the image must be
+      // rotated to compensate for the device's rotation.
+      int deviceRotation = activity.getWindowManager().getDefaultDisplay().getRotation();
+      int rotationCompensation = ORIENTATIONS.get(deviceRotation);
+
+      // On most devices, the sensor orientation is 90 degrees, but for some
+      // devices it is 270 degrees. For devices with a sensor orientation of
+      // 270, rotate the image an additional 180 ((270 + 270) % 360) degrees.
+      CameraManager cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+      int sensorOrientation = cameraManager
+              .getCameraCharacteristics(cameraId)
+              .get(CameraCharacteristics.SENSOR_ORIENTATION);
+      rotationCompensation = (rotationCompensation + sensorOrientation + 270) % 360;
+
+      // Return the corresponding FirebaseVisionImageMetadata rotation value.
+      int result;
+      switch (rotationCompensation) {
+          case 0:
+              result = FirebaseVisionImageMetadata.ROTATION_0;
+              break;
+          case 90:
+              result = FirebaseVisionImageMetadata.ROTATION_90;
+              break;
+          case 180:
+              result = FirebaseVisionImageMetadata.ROTATION_180;
+              break;
+          case 270:
+              result = FirebaseVisionImageMetadata.ROTATION_270;
+              break;
+          default:
+              result = FirebaseVisionImageMetadata.ROTATION_0;
+              Log.e(activity.getClass().getName(), "Bad rotation value: " + rotationCompensation);
+      }
+      return result;
+  }
+
+
+  @ReactMethod
+  public void deviceImageLabeling(String uri, final Promise promise) {
+    try {
+      FirebaseVisionImage image = FirebaseVisionImage.fromFilePath(this.reactContext, android.net.Uri.parse(uri));
+      FirebaseVisionImageLabeler labeler = FirebaseVision.getInstance().getOnDeviceImageLabeler();
+
+      labeler.processImage(image)
+              .addOnSuccessListener(new OnSuccessListener<List<FirebaseVisionImageLabel>>() {
+                @Override
+                public void onSuccess(List<FirebaseVisionImageLabel> labels) {
+                  promise.resolve(processDeviceImageLabelingResult(labels));
+                }
+              })
+              .addOnFailureListener(new OnFailureListener() {
+                @Override
+                public void onFailure(@NonNull Exception e) {
+                  e.printStackTrace();
+                  promise.reject(e);
+                }
+              });
+      
+    } catch (IOException e) {
+      promise.reject(e);
+      e.printStackTrace();
+    }
+  }
+
+  private WritableArray processDeviceImageLabelingResult(List<FirebaseVisionImageLabel> labels) {
+    WritableArray imageLabelsData = Arguments.createArray();
+    for( FirebaseVisionImageLabel label : labels ) {
+      WritableMap oneLabelMap = Arguments.createMap();
+
+      String text = label.getText();
+      String entityId = label.getEntityId();
+      float confidence = label.getConfidence();
+
+      oneLabelMap.putString("text", text);
+      oneLabelMap.putString("entityId", entityId);
+      oneLabelMap.putDouble("confidence", confidence);
+
+      imageLabelsData.pushMap( oneLabelMap );
+    }
+    return imageLabelsData;
+  }
+
+
+  // TODO: from byte buffer
+
+
   @Override
   public String getName() {
     return "RNMlKit";
